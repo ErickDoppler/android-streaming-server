@@ -1,0 +1,7 @@
+# Every file in this repository is owned by the repository owner.
+#
+# Combined with the "Require review from Code Owners" branch-protection rule
+# on main, this makes an approval from @ErickDoppler mandatory before any
+# pull request can be merged - even one opened by a collaborator who has
+# write access.
+* @ErickDoppler
