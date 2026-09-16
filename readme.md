@@ -29,6 +29,79 @@ Kotlin, **zero third-party dependencies**.
 
 ---
 
+## How to run it
+
+Get the code, then follow the three steps for your platform. Nothing is
+installed system-wide — no Android Studio, no `sudo`.
+
+```bash
+git clone https://github.com/ErickDoppler/android-streaming-server.git
+cd android-streaming-server
+```
+
+### Windows
+
+**1. Run `download-tools.cmd`** — fetches a JDK 17 and the Android SDK into
+`tools\`. A few hundred MB, once.
+
+```bash
+download-tools.cmd
+```
+
+**2. Run `build.cmd`** — builds `dist\streaming-server-1.4-debug.apk`.
+
+```bash
+build.cmd
+```
+
+**3. Run `build.cmd --install`** to deploy it. Connect the Android device by
+USB with **USB debugging** turned on first; this installs the APK and starts
+the app on the device.
+
+```bash
+build.cmd --install
+```
+
+### Linux / macOS
+
+**1. Run `./download-tools.sh`** — fetches a JDK 17 and the Android SDK into
+`tools/`. A few hundred MB, once.
+
+```bash
+./download-tools.sh
+```
+
+**2. Run `./build.sh`** — builds `dist/streaming-server-1.4-debug.apk`.
+
+```bash
+./build.sh
+```
+
+**3. Run `./build.sh --install`** to deploy it. Connect the Android device by
+USB with **USB debugging** turned on first; this installs the APK and starts
+the app on the device.
+
+```bash
+./build.sh --install
+```
+
+### Then
+
+The app shows the address it is serving on, for example
+`http://192.168.1.42:8080`. Open that in a browser on any device on the same
+network, or watch on the device's own screen. Point a publisher at
+`192.168.1.42:8080`, type the same stream key in the viewer, press
+**CONNECT**.
+
+> **No device attached?** Skip step 3 — `build.cmd` / `./build.sh` still
+> produces the APK in `dist/`. Copy it to the device and tap it to install
+> (Android will ask you to allow installs from that source).
+
+See [Using it](#using-it) for what the app does once it is running, and
+[Building](#building) for the build options in full.
+
+---
+
 ## Why it exists
 
 Getting a camera feed from one device onto another usually means an RTMP
@@ -43,36 +116,6 @@ the useful part locally:
   page in a WebView; on API 19/20, where WebView cannot play MSE video, it
   falls back to a native `MediaCodec` player with the same functions.
 - **Nothing to install on the viewer side.** Any browser on the LAN.
-
----
-
-## Quick start
-
-```bash
-git clone https://github.com/ErickDoppler/android-streaming-server.git
-cd android-streaming-server
-```
-
-**Windows**
-
-```bash
-download-tools.cmd
-build.cmd --install
-```
-
-**Linux / macOS**
-
-```bash
-./download-tools.sh
-./build.sh --install
-```
-
-`download-tools` fetches a JDK 17 and the Android SDK into `tools/`;
-`build` produces `dist/streaming-server-1.4-debug.apk` and, with `--install`,
-pushes it onto the device attached over adb.
-
-No Android Studio, no system-wide installs, no `sudo`. See
-[Building](#building) for the details.
 
 ---
 
