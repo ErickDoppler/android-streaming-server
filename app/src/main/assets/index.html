@@ -1,0 +1,826 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming Server</title>
+<style>
+  :root { --fg: #00ff46; --dim: #0a8f33; --bg2: #001a08; --bg: #000; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px;
+    background: var(--bg); color: var(--fg);
+    font-family: "Consolas", "Courier New", monospace;
+  }
+  h1 {
+    font-size: 22px; margin: 0 0 4px; letter-spacing: 2px;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+  }
+  .endpoints { color: var(--dim); font-size: 13px; white-space: pre-line; margin-bottom: 16px; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  input[type=text] {
+    background: var(--bg2); color: var(--fg);
+    border: 1px solid var(--dim); border-radius: 4px;
+    padding: 8px 10px; font: inherit; font-size: 16px; width: 220px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--fg); }
+  button {
+    background: var(--bg2); color: var(--fg);
+    border: 1px solid var(--fg); border-radius: 4px;
+    padding: 8px 18px; font: inherit; font-size: 15px; cursor: pointer;
+  }
+  button:active { background: var(--fg); color: var(--bg); }
+  button.small { padding: 2px 10px; font-size: 12px; border-color: var(--dim); color: var(--dim); }
+  #status { font-size: 14px; min-height: 18px; margin: 6px 0 10px; }
+  #status.live { color: var(--fg); }
+  #status.wait { color: #ffb300; }
+  #status.err  { color: #ff4040; }
+  #catalog-head { display: flex; gap: 12px; align-items: baseline; margin-top: 14px; }
+  #catalog-head h2 { font-size: 14px; margin: 0; color: var(--dim); letter-spacing: 1px; }
+  #catalog a {
+    display: inline-block; margin: 4px 10px 0 0;
+    color: var(--fg); text-decoration: underline; cursor: pointer; font-size: 15px;
+  }
+  /* The wrapper goes fullscreen (not the video): browsers drop CSS
+     transforms on a fullscreen <video>, which would reset the rotation. */
+  #wrap { margin-top: 14px; display: none; }
+  #screen {
+    max-width: 100%; display: block;
+    border: 1px solid var(--dim); background: #010;
+  }
+  #wrap:fullscreen {
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  /* Fake fullscreen for browsers/WebViews without the Fullscreen API. */
+  #wrap.fs {
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
+    margin: 0; z-index: 100; background: #000;
+    display: flex; align-items: center; justify-content: center;
+  }
+  /* Fill the whole screen; the picture letterboxes inside the element. */
+  #wrap:fullscreen #screen, #wrap.fs #screen {
+    width: 100vw; height: 100vh; max-width: 100vw; max-height: 100vh;
+    border: none; object-fit: contain; background: #000;
+  }
+  #hint { color: var(--dim); font-size: 11px; margin-top: 4px; display: none; }
+</style>
+</head>
+<body>
+  <h1 id="title">STREAMING SERVER</h1>
+  <div class="endpoints" id="endpoints">loading server info...</div>
+
+  <div class="row">
+    <label for="key">KEY</label>
+    <input type="text" id="key" maxlength="64" autocomplete="off"
+           placeholder="stream key" spellcheck="false">
+    <button id="connect">CONNECT</button>
+  </div>
+  <div id="status"></div>
+
+  <div id="catalog-head">
+    <h2>STREAMING CATALOG</h2>
+    <button class="small" id="clear">CLEAR</button>
+  </div>
+  <div id="catalog"></div>
+
+  <div id="wrap">
+    <video id="screen" muted autoplay playsinline controls></video>
+  </div>
+  <div id="hint">DOUBLE CLICK: FULLSCREEN &nbsp;&middot;&nbsp; LONG PRESS: ROTATE
+    &nbsp;&middot;&nbsp; SOUND STARTS MUTED</div>
+
+<script>
+'use strict';
+
+const $ = (id) => document.getElementById(id);
+const KEY_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const CATALOG_LS = 'stream_catalog';
+const FLAG_KEY = 1;
+const FLAG_AUDIO = 2;
+
+// ------------------------------------------------------------ server info
+
+fetch('/info').then((r) => r.json()).then((info) => {
+  $('title').textContent = 'STREAMING SERVER V' + info.version;
+  document.title = 'Streaming Server V' + info.version;
+  const ips = info.ips.length ? info.ips : [location.hostname];
+  $('endpoints').textContent =
+    'STREAM CLIENTS CONNECT TO:  ' +
+    ips.map((ip) => ip + ':' + info.streamPort).join('   ') +
+    '\nVIEWER PAGE:                ' +
+    ips.map((ip) => 'http://' + ip + ':' + info.viewerPort).join('   ');
+}).catch(() => {
+  $('endpoints').textContent = 'server info unavailable';
+});
+
+// ---------------------------------------------------------------- catalog
+
+function catalogGet() {
+  try {
+    const a = JSON.parse(localStorage.getItem(CATALOG_LS) || '[]');
+    return Array.isArray(a) ? a : [];
+  } catch (_) { return []; }
+}
+
+function catalogAdd(key) {
+  const a = catalogGet().filter((k) => k !== key);
+  a.unshift(key);
+  localStorage.setItem(CATALOG_LS, JSON.stringify(a.slice(0, 50)));
+  renderCatalog();
+}
+
+function renderCatalog() {
+  const box = $('catalog');
+  box.textContent = '';
+  for (const k of catalogGet()) {
+    const a = document.createElement('a');
+    a.textContent = k;
+    a.onclick = () => { $('key').value = k; connect(); };
+    box.appendChild(a);
+  }
+}
+
+$('clear').onclick = () => {
+  localStorage.removeItem(CATALOG_LS);
+  renderCatalog();
+};
+renderCatalog();
+
+// ------------------------------------------------------------ color scheme
+// Double click (or double tap) on the STREAMING SERVER header cycles the
+// page colors in the HUD instruments-panel order, minus the dark variants
+// (the page derives its own dim shade of every color): White, Grey, Green,
+// Yellow, Red, Sky blue. The page ships green, which is index 2.
+
+const SCHEMES = [
+  [255, 255, 255], [128, 128, 128], [0, 255, 70],
+  [255, 255, 0], [255, 45, 45], [120, 210, 255]
+];
+let schemeIdx = parseInt(localStorage.getItem('color_scheme') || '2', 10);
+if (!(schemeIdx >= 0 && schemeIdx < SCHEMES.length)) schemeIdx = 2;
+
+function applyScheme() {
+  const c = SCHEMES[schemeIdx];
+  const root = document.documentElement.style;
+  root.setProperty('--fg', 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')');
+  root.setProperty('--dim', 'rgb(' + Math.round(c[0] * 0.55) + ',' +
+    Math.round(c[1] * 0.55) + ',' + Math.round(c[2] * 0.55) + ')');
+  root.setProperty('--bg2', 'rgb(' + Math.round(c[0] * 0.10) + ',' +
+    Math.round(c[1] * 0.10) + ',' + Math.round(c[2] * 0.10) + ')');
+}
+applyScheme();
+
+let lastTitleTap = 0;
+$('title').addEventListener('click', () => {
+  const now = Date.now();
+  if (now - lastTitleTap < 350) {
+    lastTitleTap = 0;
+    schemeIdx = (schemeIdx + 1) % SCHEMES.length;
+    localStorage.setItem('color_scheme', String(schemeIdx));
+    applyScheme();
+  } else {
+    lastTitleTap = now;
+  }
+});
+
+// ------------------------------------------- fMP4 muxing (H.264 + AAC)
+// MSE cannot eat raw Annex-B or ADTS, so incoming frames are wrapped into
+// fragmented-MP4 segments right here — one SourceBuffer per track.
+
+function be16(n) { return [n >>> 8 & 255, n & 255]; }
+function be32(n) { return [n >>> 24 & 255, n >>> 16 & 255, n >>> 8 & 255, n & 255]; }
+
+function box(type) {
+  const parts = [].slice.call(arguments, 1);
+  let size = 8;
+  for (const p of parts) size += p.length;
+  const out = new Uint8Array(size);
+  out.set(be32(size), 0);
+  for (let i = 0; i < 4; i++) out[4 + i] = type.charCodeAt(i);
+  let o = 8;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
+function full(type, version, flags) {
+  const head = new Uint8Array([version, flags >>> 16 & 255, flags >>> 8 & 255, flags & 255]);
+  return box.apply(null, [type, head].concat([].slice.call(arguments, 3)));
+}
+
+/** Splits an Annex-B buffer into NAL units (without start codes). */
+function splitNals(data) {
+  const nals = [];
+  let i = 0, start = -1;
+  while (i + 2 < data.length) {
+    if (data[i] === 0 && data[i + 1] === 0 &&
+        (data[i + 2] === 1 || (data[i + 2] === 0 && data[i + 3] === 1))) {
+      const skip = data[i + 2] === 1 ? 3 : 4;
+      if (start >= 0) nals.push(data.subarray(start, i));
+      i += skip;
+      start = i;
+    } else {
+      i++;
+    }
+  }
+  if (start >= 0) nals.push(data.subarray(start));
+  return nals;
+}
+
+function extractSpsPps(data) {
+  let sps = null, pps = null;
+  for (const n of splitNals(data)) {
+    const t = n[0] & 0x1f;
+    if (t === 7) sps = n;
+    else if (t === 8) pps = n;
+  }
+  return { sps, pps };
+}
+
+/** Minimal SPS parse: profile bytes and coded dimensions. */
+function parseSps(sps) {
+  const rbsp = [];
+  for (let i = 1; i < sps.length; i++) {
+    if (i >= 3 && sps[i] === 3 && sps[i - 1] === 0 && sps[i - 2] === 0) continue;
+    rbsp.push(sps[i]);
+  }
+  let bit = 0;
+  const u = (n) => {
+    let v = 0;
+    for (let i = 0; i < n; i++) { v = (v << 1) | ((rbsp[bit >> 3] >> (7 - (bit & 7))) & 1); bit++; }
+    return v;
+  };
+  const ue = () => { let z = 0; while (u(1) === 0 && z < 32) z++; return (1 << z) - 1 + u(z); };
+  const se = () => { const k = ue(); return (k & 1) ? (k + 1) >> 1 : -(k >> 1); };
+  const profile = u(8);
+  u(8); u(8); ue();
+  if ([100, 110, 122, 244, 44, 83, 86, 118, 128].indexOf(profile) >= 0) {
+    const chroma = ue();
+    if (chroma === 3) u(1);
+    ue(); ue(); u(1);
+    if (u(1)) {
+      for (let i = 0; i < (chroma !== 3 ? 8 : 12); i++) {
+        if (u(1)) {
+          let last = 8, next = 8;
+          const size = i < 6 ? 16 : 64;
+          for (let j = 0; j < size; j++) {
+            if (next !== 0) next = (last + se() + 256) % 256;
+            if (next !== 0) last = next;
+          }
+        }
+      }
+    }
+  }
+  ue();
+  const poc = ue();
+  if (poc === 0) ue();
+  else if (poc === 1) { u(1); se(); se(); const n = ue(); for (let i = 0; i < n; i++) se(); }
+  ue(); u(1);
+  const wMbs = ue() + 1, hMbs = ue() + 1;
+  const frameMbsOnly = u(1);
+  if (!frameMbsOnly) u(1);
+  u(1);
+  let cl = 0, cr = 0, ct = 0, cb = 0;
+  if (u(1)) { cl = ue(); cr = ue(); ct = ue(); cb = ue(); }
+  return {
+    codec: 'avc1.' + [sps[1], sps[2], sps[3]]
+      .map((b) => b.toString(16).padStart(2, '0')).join(''),
+    width: wMbs * 16 - (cl + cr) * 2,
+    height: (2 - frameMbsOnly) * hMbs * 16 - (ct + cb) * (frameMbsOnly ? 2 : 4)
+  };
+}
+
+const MVHD = () => full('mvhd', 0, 0, be32(0), be32(0), be32(1000), be32(0),
+  be32(0x00010000), new Uint8Array([1, 0, 0, 0]), new Uint8Array(8),
+  new Uint8Array([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0]),
+  new Uint8Array(24), be32(2));
+
+const MATRIX = () => new Uint8Array([0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0,
+  0, 0, 0, 0, 0, 0, 0, 0, 0x40, 0, 0, 0]);
+
+const MVEX = () => box('mvex',
+  full('trex', 0, 0, be32(1), be32(1), be32(0), be32(0), be32(0)));
+
+function initSegment(sps, pps, width, height) {
+  const ftyp = box('ftyp',
+    new Uint8Array([105, 115, 111, 109]), be32(1),
+    new Uint8Array([105, 115, 111, 109, 97, 118, 99, 49]));
+  const avcC = box('avcC', new Uint8Array(
+    [1, sps[1], sps[2], sps[3], 0xff, 0xe1]
+      .concat(be16(sps.length)).concat([].slice.call(sps))
+      .concat([1]).concat(be16(pps.length)).concat([].slice.call(pps))));
+  const avc1 = box('avc1', new Uint8Array(
+    [0, 0, 0, 0, 0, 0, 0, 1,
+     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+      .concat(be16(width)).concat(be16(height))
+      .concat([0, 0x48, 0, 0, 0, 0x48, 0, 0,
+        0, 0, 0, 0, 0, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0x18, 0xff, 0xff])), avcC);
+  const stbl = box('stbl',
+    full('stsd', 0, 0, be32(1), avc1),
+    full('stts', 0, 0, be32(0)),
+    full('stsc', 0, 0, be32(0)),
+    full('stsz', 0, 0, be32(0), be32(0)),
+    full('stco', 0, 0, be32(0)));
+  const dinf = box('dinf', full('dref', 0, 0, be32(1), full('url ', 0, 1)));
+  const minf = box('minf',
+    full('vmhd', 0, 1, new Uint8Array(8)), dinf, stbl);
+  const hdlr = full('hdlr', 0, 0, new Uint8Array(
+    [0, 0, 0, 0, 118, 105, 100, 101, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const mdhd = full('mdhd', 0, 0, be32(0), be32(0), be32(1000), be32(0),
+    new Uint8Array([0x55, 0xc4, 0, 0]));
+  const mdia = box('mdia', mdhd, hdlr, minf);
+  const tkhd = full('tkhd', 0, 3, be32(0), be32(0), be32(1), be32(0), be32(0),
+    new Uint8Array(8), new Uint8Array(8), MATRIX(),
+    be32(width << 16), be32(height << 16));
+  const moov = box('moov', MVHD(), box('trak', tkhd, mdia), MVEX());
+  const out = new Uint8Array(ftyp.length + moov.length);
+  out.set(ftyp, 0);
+  out.set(moov, ftyp.length);
+  return out;
+}
+
+/** Audio init segment: one AAC-LC track, timescale = sample rate. */
+function audioInitSegment(cfg) {
+  const ftyp = box('ftyp',
+    new Uint8Array([105, 115, 111, 109]), be32(1),
+    new Uint8Array([105, 115, 111, 109, 109, 112, 52, 97]));
+  const asc = cfg.asc;
+  // ES(3) > DecoderConfig(4) > DecSpecificInfo(5) + SLConfig(6).
+  const esds = full('esds', 0, 0, new Uint8Array(
+    [0x03, 23 + asc.length, 0, 1, 0,
+     0x04, 15 + asc.length, 0x40, 0x15, 0, 0, 0,
+     0, 1, 0xf4, 0, 0, 1, 0xf4, 0,
+     0x05, asc.length].concat([].slice.call(asc))
+      .concat([0x06, 1, 0x02])));
+  const mp4a = box('mp4a', new Uint8Array(
+    [0, 0, 0, 0, 0, 0, 0, 1,
+     0, 0, 0, 0, 0, 0, 0, 0]
+      .concat(be16(cfg.channels)).concat(be16(16))
+      .concat([0, 0, 0, 0])
+      .concat(be16(cfg.rate)).concat([0, 0])), esds);
+  const stbl = box('stbl',
+    full('stsd', 0, 0, be32(1), mp4a),
+    full('stts', 0, 0, be32(0)),
+    full('stsc', 0, 0, be32(0)),
+    full('stsz', 0, 0, be32(0), be32(0)),
+    full('stco', 0, 0, be32(0)));
+  const dinf = box('dinf', full('dref', 0, 0, be32(1), full('url ', 0, 1)));
+  const minf = box('minf', full('smhd', 0, 0, new Uint8Array(4)), dinf, stbl);
+  const hdlr = full('hdlr', 0, 0, new Uint8Array(
+    [0, 0, 0, 0, 115, 111, 117, 110, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]));
+  const mdhd = full('mdhd', 0, 0, be32(0), be32(0), be32(cfg.rate), be32(0),
+    new Uint8Array([0x55, 0xc4, 0, 0]));
+  const mdia = box('mdia', mdhd, hdlr, minf);
+  const tkhd = full('tkhd', 0, 3, be32(0), be32(0), be32(1), be32(0), be32(0),
+    new Uint8Array(8),
+    new Uint8Array([0, 0, 0, 0, 1, 0, 0, 0]), // audio volume 1.0
+    MATRIX(), be32(0), be32(0));
+  const moov = box('moov', MVHD(), box('trak', tkhd, mdia), MVEX());
+  const out = new Uint8Array(ftyp.length + moov.length);
+  out.set(ftyp, 0);
+  out.set(moov, ftyp.length);
+  return out;
+}
+
+let fragSeqV = 1;
+let fragSeqA = 1;
+
+function fragment(nals, isKey, dts, duration) {
+  let mdatSize = 0;
+  for (const n of nals) mdatSize += 4 + n.length;
+  const sampleFlags = isKey ? 0x02000000 : 0x01010000;
+  const trun = full('trun', 0, 0x000701, be32(1), be32(0),
+    be32(duration), be32(mdatSize), be32(sampleFlags));
+  const tfdt = full('tfdt', 1, 0, be32(Math.floor(dts / 4294967296)), be32(dts >>> 0));
+  const tfhd = full('tfhd', 0, 0x020000, be32(1));
+  const traf = box('traf', tfhd, tfdt, trun);
+  const moof = box('moof', full('mfhd', 0, 0, be32(fragSeqV++)), traf);
+  const trunOffset = moof.length - trun.length + 16;
+  moof.set(be32(moof.length + 8), trunOffset);
+  const out = new Uint8Array(moof.length + 8 + mdatSize);
+  out.set(moof, 0);
+  out.set(be32(8 + mdatSize), moof.length);
+  out.set([109, 100, 97, 116], moof.length + 4);
+  let o = moof.length + 8;
+  for (const n of nals) {
+    out.set(be32(n.length), o);
+    out.set(n, o + 4);
+    o += 4 + n.length;
+  }
+  return out;
+}
+
+/** One audio fragment from N raw AAC frames (1024 samples each). */
+function audioFragment(samples, rate) {
+  let mdatSize = 0;
+  const entries = [];
+  for (const s of samples) {
+    mdatSize += s.raw.length;
+    entries.push(be32(1024), be32(s.raw.length));
+  }
+  const trunPayload = [be32(samples.length), be32(0)].concat(entries)
+    .reduce((a, b) => a.concat(b), []);
+  const trun = full('trun', 0, 0x000301, new Uint8Array(trunPayload));
+  const dts = Math.max(0, Math.round(samples[0].ts * rate / 1000));
+  const tfdt = full('tfdt', 1, 0, be32(Math.floor(dts / 4294967296)), be32(dts >>> 0));
+  const tfhd = full('tfhd', 0, 0x020000, be32(1));
+  const traf = box('traf', tfhd, tfdt, trun);
+  const moof = box('moof', full('mfhd', 0, 0, be32(fragSeqA++)), traf);
+  const trunOffset = moof.length - trun.length + 16;
+  moof.set(be32(moof.length + 8), trunOffset);
+  const out = new Uint8Array(moof.length + 8 + mdatSize);
+  out.set(moof, 0);
+  out.set(be32(8 + mdatSize), moof.length);
+  out.set([109, 100, 97, 116], moof.length + 4);
+  let o = moof.length + 8;
+  for (const s of samples) {
+    out.set(s.raw, o);
+    o += s.raw.length;
+  }
+  return out;
+}
+
+// ------------------------------------------------------------ ADTS parsing
+
+const ADTS_RATES = [96000, 88200, 64000, 48000, 44100, 32000,
+  24000, 22050, 16000, 12000, 11025, 8000];
+
+/** Config from the first ADTS header: rate, channels, AudioSpecificConfig. */
+function parseAdts(data) {
+  if (data.length < 7 || data[0] !== 0xff || (data[1] & 0xf0) !== 0xf0) return null;
+  const objType = ((data[2] >> 6) & 3) + 1;
+  const freqIdx = (data[2] >> 2) & 0xf;
+  const channels = ((data[2] & 1) << 2) | ((data[3] >> 6) & 3);
+  if (freqIdx >= ADTS_RATES.length || channels === 0) return null;
+  return {
+    rate: ADTS_RATES[freqIdx],
+    channels,
+    asc: new Uint8Array([
+      (objType << 3) | (freqIdx >> 1),
+      ((freqIdx & 1) << 7) | (channels << 3)
+    ])
+  };
+}
+
+/** Raw AAC frames from an ADTS payload (headers stripped). */
+function splitAdts(data) {
+  const out = [];
+  let i = 0;
+  while (i + 7 <= data.length) {
+    if (data[i] !== 0xff || (data[i + 1] & 0xf0) !== 0xf0) break;
+    const len = ((data[i + 3] & 3) << 11) | (data[i + 4] << 3) | ((data[i + 5] >> 5) & 7);
+    if (len < 7 || i + len > data.length) break;
+    const head = (data[i + 1] & 1) ? 7 : 9; // protection_absent ? 7 : 9
+    out.push(data.subarray(i + head, i + len));
+    i += len;
+  }
+  return out;
+}
+
+// ------------------------------------------------------------------ player
+
+const video = $('screen');
+let ws = null;
+let currentKey = '';
+let lastFrameAt = 0;
+let watchdog = null;
+
+let media = null;
+let sbV = null;
+let sbA = null;
+let qV = [];
+let qA = [];
+let aQueue = [];
+let bootFrames = null;   // frames collected during the audio-detect grace
+let bootSps = null;
+let bootPps = null;
+let basePts = 0;
+let lastVPts = -1;
+let spsHex = '';
+let audioCfg = null;
+
+function setStatus(text, cls) {
+  const el = $('status');
+  el.textContent = text;
+  el.className = cls || '';
+}
+
+function pump(sb, q) {
+  if (!sb || sb.updating || !q.length) return;
+  try {
+    sb.appendBuffer(q.shift());
+  } catch (_) {
+    resetPlayer(); // quota or state error: rebuild on the next keyframe
+  }
+}
+
+function trim(sb) {
+  try {
+    if (sb && !sb.updating && video.buffered.length &&
+        video.buffered.end(0) - video.buffered.start(0) > 20) {
+      sb.remove(0, video.buffered.end(0) - 5);
+    }
+  } catch (_) {}
+}
+
+function resetPlayer() {
+  try { if (media && media.readyState === 'open') media.endOfStream(); } catch (_) {}
+  media = null;
+  sbV = null;
+  sbA = null;
+  qV = [];
+  qA = [];
+  aQueue = [];
+  bootFrames = null;
+  bootSps = null;
+  bootPps = null;
+  spsHex = '';
+  lastVPts = -1;
+  audioCfg = null;
+}
+
+function onFrame(buf) {
+  const dv = new DataView(buf);
+  const flags = dv.getUint8(0);
+  const ptsMs = Number(dv.getBigUint64(1));
+  const data = new Uint8Array(buf, 9);
+  process((flags & FLAG_AUDIO) !== 0, (flags & FLAG_KEY) !== 0, ptsMs, data);
+  lastFrameAt = Date.now();
+  setStatus('LIVE  —  ' + currentKey, 'live');
+}
+
+function process(isAudio, isKey, pts, data) {
+  if (bootFrames) {
+    bootFrames.push({ isAudio, isKey, pts, data });
+    return;
+  }
+  if (!media) {
+    // Bootstrapping: a video keyframe with SPS/PPS starts the player. A
+    // short grace period first collects frames to learn whether the
+    // publisher sends sound at all.
+    if (isAudio || !isKey) return;
+    const h = extractSpsPps(data);
+    if (!h.sps || !h.pps) return;
+    bootSps = h.sps;
+    bootPps = h.pps;
+    spsHex = h.sps.join(',');
+    basePts = pts;
+    lastVPts = -1;
+    bootFrames = [{ isAudio: false, isKey: true, pts, data }];
+    setTimeout(buildPlayer, 400);
+    return;
+  }
+  if (isAudio) audioFrame(pts, data);
+  else videoFrame(isKey, pts, data);
+}
+
+function buildPlayer() {
+  if (!bootFrames || !bootSps) return;
+  const ms = new MediaSource();
+  media = ms;
+  video.src = URL.createObjectURL(ms);
+  $('wrap').style.display = 'block';
+  $('hint').style.display = 'block';
+  ms.addEventListener('sourceopen', () => {
+    URL.revokeObjectURL(video.src);
+    if (media !== ms || !bootFrames) return; // reset raced the open
+    // Frames kept buffering into bootFrames until now, so nothing can get
+    // queued ahead of the init segments.
+    const frames = bootFrames;
+    bootFrames = null;
+    const a = frames.find((f) => f.isAudio);
+    audioCfg = a ? parseAdts(a.data) : null;
+    const meta = parseSps(bootSps);
+    sbV = ms.addSourceBuffer('video/mp4; codecs="' + meta.codec + '"');
+    sbV.mode = 'segments';
+    sbV.addEventListener('updateend', () => { pump(sbV, qV); trim(sbV); });
+    qV.push(initSegment(bootSps, bootPps, meta.width, meta.height));
+    if (audioCfg) {
+      sbA = ms.addSourceBuffer('audio/mp4; codecs="mp4a.40.2"');
+      sbA.mode = 'segments';
+      sbA.addEventListener('updateend', () => { pump(sbA, qA); trim(sbA); });
+      qA.push(audioInitSegment(audioCfg));
+    }
+    for (const f of frames) {
+      if (f.isAudio) audioFrame(f.pts, f.data);
+      else videoFrame(f.isKey, f.pts, f.data);
+    }
+    pump(sbV, qV);
+    if (sbA) pump(sbA, qA);
+    video.play().catch(() => {});
+    applyRotation();
+  });
+}
+
+function videoFrame(isKey, pts, data) {
+  if (!sbV) return;
+  if (isKey) {
+    // Publisher restart: new SPS bytes, or a wild pts jump with the same
+    // encoder settings. Either way the whole player is rebuilt.
+    const h = extractSpsPps(data);
+    const changed = h.sps && h.sps.join(',') !== spsHex;
+    const jumped = lastVPts >= 0 && Math.abs(pts - lastVPts) > 3000;
+    if (changed || jumped) {
+      resetPlayer();
+      process(false, true, pts, data);
+      return;
+    }
+  }
+  const duration = lastVPts < 0 ? 33 : Math.min(Math.max(pts - lastVPts, 1), 200);
+  lastVPts = pts;
+  const nals = splitNals(data);
+  if (!nals.length) return;
+  qV.push(fragment(nals, isKey, Math.max(0, pts - basePts), duration));
+  pump(sbV, qV);
+}
+
+function audioFrame(pts, data) {
+  if (!sbA || !audioCfg) return;
+  for (const raw of splitAdts(data)) {
+    aQueue.push({ ts: pts - basePts, raw });
+  }
+  if (aQueue.length >= 4) {
+    qA.push(audioFragment(aQueue.splice(0, aQueue.length), audioCfg.rate));
+    pump(sbA, qA);
+  }
+}
+
+// Stay glued to the live edge (unless the user paused on purpose).
+setInterval(() => {
+  try {
+    if (!video.paused && video.buffered.length) {
+      const end = video.buffered.end(video.buffered.length - 1);
+      if (end - video.currentTime > 0.7) video.currentTime = end - 0.1;
+    }
+  } catch (_) {}
+}, 1000);
+
+// ------------------------------------------------------------- fullscreen
+// Double click (or double tap) on the stream toggles fullscreen; a second
+// double click or ESC returns to the normal browser window.
+
+const wrap = $('wrap');
+
+function inFullscreen() {
+  return document.fullscreenElement === wrap ||
+    document.webkitFullscreenElement === wrap ||
+    wrap.classList.contains('fs');
+}
+
+function enterFullscreen() {
+  try {
+    // WebViews without fullscreen support: straight to the CSS fallback.
+    if (document.fullscreenEnabled === false &&
+        document.webkitFullscreenEnabled !== true) {
+      wrap.classList.add('fs');
+      return;
+    }
+    if (wrap.requestFullscreen) {
+      const p = wrap.requestFullscreen();
+      if (p && p.catch) p.catch(() => wrap.classList.add('fs'));
+      return;
+    }
+    if (wrap.webkitRequestFullscreen) {
+      wrap.webkitRequestFullscreen();
+      return;
+    }
+    wrap.classList.add('fs');
+  } catch (_) {
+    wrap.classList.add('fs');
+  }
+}
+
+function exitFullscreen() {
+  try {
+    if (document.fullscreenElement && document.exitFullscreen) {
+      const p = document.exitFullscreen();
+      if (p && p.catch) p.catch(() => {});
+    } else if (document.webkitFullscreenElement &&
+               document.webkitExitFullscreen) {
+      document.webkitExitFullscreen();
+    }
+  } catch (_) {}
+  wrap.classList.remove('fs');
+}
+
+// Click-pair detector: works for mouse double clicks AND double taps.
+let lastTapAt = 0;
+video.addEventListener('click', () => {
+  if (longFired) { longFired = false; return; } // the long press was a rotate
+  const now = Date.now();
+  if (now - lastTapAt < 350) {
+    lastTapAt = 0;
+    if (inFullscreen()) exitFullscreen(); else enterFullscreen();
+  } else {
+    lastTapAt = now;
+  }
+});
+// The native <video controls> double-click fullscreen would fight ours.
+video.addEventListener('dblclick', (e) => e.preventDefault());
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') exitFullscreen();
+});
+
+// --------------------------------------------------------------- rotation
+// Long mouse press / long tap on the stream rotates the picture 90° per
+// press — for weird camera mounting angles. Remembered across visits.
+
+let rotation = parseInt(localStorage.getItem('video_rot') || '0', 10);
+if ([0, 90, 180, 270].indexOf(rotation) < 0) rotation = 0;
+
+function applyRotation() {
+  const r = rotation;
+  let t = '';
+  if (r) {
+    t = 'rotate(' + r + 'deg)';
+    if ((r === 90 || r === 270) && video.clientWidth > 0) {
+      // Fit the rotated picture back inside the element's box.
+      t += ' scale(' + (video.clientHeight / video.clientWidth) + ')';
+    }
+  }
+  video.style.transform = t;
+}
+
+let pressTimer = null;
+let longFired = false;
+video.addEventListener('pointerdown', () => {
+  longFired = false;
+  clearTimeout(pressTimer);
+  pressTimer = setTimeout(() => {
+    longFired = true;
+    rotation = (rotation + 90) % 360;
+    localStorage.setItem('video_rot', String(rotation));
+    applyRotation();
+  }, 600);
+});
+const cancelPress = () => clearTimeout(pressTimer);
+video.addEventListener('pointerup', cancelPress);
+video.addEventListener('pointerleave', cancelPress);
+video.addEventListener('pointercancel', cancelPress);
+video.addEventListener('contextmenu', (e) => e.preventDefault());
+window.addEventListener('resize', applyRotation);
+document.addEventListener('fullscreenchange', applyRotation);
+applyRotation();
+
+// -------------------------------------------------------------- connection
+
+function disconnect() {
+  if (ws) {
+    ws.onclose = null;
+    try { ws.close(); } catch (_) {}
+    ws = null;
+  }
+  if (watchdog) { clearInterval(watchdog); watchdog = null; }
+  resetPlayer();
+}
+
+function connect() {
+  const key = $('key').value.trim();
+  if (!KEY_RE.test(key)) {
+    setStatus('INVALID KEY (letters, digits, - and _ only)', 'err');
+    return;
+  }
+  disconnect();
+  currentKey = key;
+  catalogAdd(key);
+  setStatus('CONNECTING — ' + key + ' ...', 'wait');
+
+  const sock = new WebSocket('ws://' + location.host + '/ws?key=' +
+    encodeURIComponent(key));
+  ws = sock;
+  sock.binaryType = 'arraybuffer';
+  sock.onmessage = (ev) => onFrame(ev.data);
+  sock.onopen = () => {
+    setStatus('WAITING FOR STREAM — ' + currentKey, 'wait');
+    lastFrameAt = 0;
+    watchdog = setInterval(() => {
+      if (lastFrameAt && Date.now() - lastFrameAt > 2500) {
+        setStatus('WAITING FOR STREAM — ' + currentKey, 'wait');
+      }
+    }, 1000);
+  };
+  sock.onclose = () => {
+    // The server went away: retry as long as the user stays on this key.
+    if (ws === sock) {
+      ws = null;
+      setStatus('SERVER LOST — RETRYING ' + currentKey + ' ...', 'err');
+      setTimeout(() => {
+        if (currentKey === key && !ws) { $('key').value = key; connect(); }
+      }, 2000);
+    }
+  };
+}
+
+$('connect').onclick = connect;
+$('key').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') connect();
+});
+</script>
+</body>
+</html>

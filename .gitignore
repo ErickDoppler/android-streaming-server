@@ -1,0 +1,39 @@
+# --- Gradle / build output ---
+build/
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+captures/
+*.apk
+*.aab
+*.ap_
+*.dex
+*.class
+*.hprof
+
+# --- Machine-local configuration ---
+local.properties
+
+# --- Signing material (never commit) ---
+*.jks
+*.keystore
+*.p12
+*.pfx
+keystore.properties
+
+# --- IDE ---
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+
+# --- Toolchain fetched by download-tools.cmd / download-tools.sh ---
+tools/
+
+# --- Staged build output from build.cmd / build.sh ---
+dist/
