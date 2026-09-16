@@ -306,6 +306,33 @@ video-only.
 
 ---
 
+## Contributing
+
+The repository is public: anyone may clone it, and anyone may propose a
+change. `main` is protected — it takes pull requests only, and a pull request
+needs an approving review from the repository owner before it can be merged.
+
+```bash
+# 1. fork on GitHub, then
+git clone https://github.com/<you>/android-streaming-server.git
+cd android-streaming-server
+git checkout -b my-change
+
+# 2. make it build before you send it
+./download-tools.sh && ./build.sh        # build.cmd on Windows
+
+# 3. push to YOUR fork and open a pull request against ErickDoppler/main
+git push origin my-change
+```
+
+You push branches to your own fork, not to this repository — that is how
+GitHub works for anyone who is not a collaborator here, and it needs no
+permission from anyone. If you are added as a collaborator you can push
+branches here directly, but `main` still only moves through a reviewed pull
+request.
+
+---
+
 ## Related projects
 
 - **`node-streaming-server`** — the same relay as a Node.js server; identical
